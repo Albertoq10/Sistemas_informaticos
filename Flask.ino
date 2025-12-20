@@ -5,9 +5,7 @@
 #include <WiFi.h>
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
-
-const char* ssid     = "iPhoneBETO"; //recuerda cambiar wifi, MN2 es de casa. Revisa en serial monitor que se conecte
-const char* password = "12345678";
+#include "env.h" // Configurar con tus datos en env.h
 
 // Usa un pin de ADC1 para poder leer con WiFi activo
 const int POT_PIN = 32;  
@@ -18,7 +16,7 @@ void setup() {
   Serial.begin(230400);
 
   
-  WiFi.begin(ssid, password);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.println("Connecting to WiFi..");
@@ -44,9 +42,9 @@ void loop() {
     Serial.print("JSON -> ");
     Serial.println(json_string);
 
-
     HTTPClient http;
-    http.begin("http://172.20.10.3:6000/sensor_values");  // cambia a la IP/puerto de tu PC IP DE PC!!!, a la esp32 se le asigna otra ip
+    String url = String(SERVER_BASE_URL) + "/sensor_values";
+    http.begin(url);  // cambia a la IP/puerto de tu PC
     http.addHeader("Content-Type", "application/json");
 
     int httpResponseCode = http.POST(json_string);

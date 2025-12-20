@@ -4,13 +4,31 @@ from flask import Flask, request, jsonify
 import requests
 import time
 import math
+import os
 
 app = Flask("servidor_flask")
 
-INFLUX_URL_BASE = '127.0.0.1'  #local
-INFLUX_TOKEN = 'NtZ58sLCY9fxPHq5yzC5qOr8iXVGHq81XWZs5wqu4JrN8EFgPLpFb7h96IrxCoJSSrJH85SilSxO0rrgH9VAIA=='#token, guardada en carpeta de clase de lunes
-INFLUX_ORG   = 'UC3M'
-INFLUX_BUCKET= 'Pot_pruebas'#recuerda cambiar
+def _load_env_file(path: str = ".env"):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    os.environ.setdefault(key, value)
+    except FileNotFoundError:
+        pass
+
+_load_env_file()
+
+INFLUX_URL_BASE = os.environ.get('INFLUX_URL_BASE', '127.0.0.1')  # local
+INFLUX_TOKEN    = os.environ.get('INFLUX_TOKEN', 'NtZ58sLCY9fxPHq5yzC5qOr8iXVGHq81XWZs5wqu4JrN8EFgPLpFb7h96IrxCoJSSrJH85SilSxO0rrgH9VAIA==')
+INFLUX_ORG      = os.environ.get('INFLUX_ORG', 'UC3M')
+INFLUX_BUCKET   = os.environ.get('INFLUX_BUCKET', 'Pot_pruebas')  # recuerda cambiar
 
 
 WRITE_URL = 'http://{}:8086/api/v2/write?org={}&bucket={}&precision=ms'.format(INFLUX_URL_BASE,INFLUX_ORG,INFLUX_BUCKET)#lanzar influx db simepre
