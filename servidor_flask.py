@@ -5,6 +5,10 @@ import requests
 import time
 import math
 import os
+from river import linear_model, preprocessing
+import pandas as pd
+from influxdb_client import InfluxDBClient, Point, WritePrecision
+from influxdb_client.client.write_api import SYNCHRONOUS
 
 app = Flask("servidor_flask")
 
