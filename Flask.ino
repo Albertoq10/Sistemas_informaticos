@@ -44,9 +44,72 @@ int lastPosH = 0;
 int lastPosV = 0;
 Servo servoV;
 
+// Control de impresión serial
+const unsigned long SERIAL_PRINT_INTERVAL = 1000;  // ms entre impresiones si no cambia
+const int SERIAL_MIN_DELTA = 20;  // Cambio mínimo en lectura para forzar impresión
+unsigned long lastSerialPrint = 0;
+int lastPrintTl = 0, lastPrintTr = 0, lastPrintBl = 0, lastPrintBr = 0;
+bool hasPrintedSensors = false;
+
 WiFiClient wifi;
 
 #include "calibracion.h" // Lógica de calibración (solo si CALIBRATION_MODE es true)
+
+void printStatusOnChange(int tl, int tr, int bl, int br,
+                         int posH, int posV,
+                         const char* movH, const char* movV,
+                         bool movedH, bool movedV,
+                         bool hitLimitH, bool hitLimitV) {
+  bool sensorChanged = (abs(tl - lastPrintTl) > SERIAL_MIN_DELTA) ||
+                       (abs(tr - lastPrintTr) > SERIAL_MIN_DELTA) ||
+                       (abs(bl - lastPrintBl) > SERIAL_MIN_DELTA) ||
+                       (abs(br - lastPrintBr) > SERIAL_MIN_DELTA);
+  bool timeElapsed = (millis() - lastSerialPrint) >= SERIAL_PRINT_INTERVAL;
+  bool hasEvent = movedH || movedV || hitLimitH || hitLimitV;
+  bool shouldPrint = hasEvent || !hasPrintedSensors || sensorChanged || timeElapsed;
+
+  if (shouldPrint) {
+    Serial.print("LDR -> TL:");
+    Serial.print(tl);
+    Serial.print(" TR:");
+    Serial.print(tr);
+    Serial.print(" BL:");
+    Serial.print(bl);
+    Serial.print(" BR:");
+    Serial.println(br);
+
+    Serial.print("SERVO -> H:");
+    Serial.print(posH);
+    Serial.print(" V:");
+    Serial.print(posV);
+    Serial.print("  MOV -> H:");
+    Serial.print(movH);
+    Serial.print(" V:");
+    Serial.println(movV);
+
+    if (hitLimitH) {
+      if (posH == limiteMinH) {
+        Serial.println(String("[LÍMITE MIN] Eje H (") + limiteMinH + "°)");
+      } else if (posH == limiteMaxH) {
+        Serial.println(String("[LÍMITE MAX] Eje H (") + limiteMaxH + "°)");
+      }
+    }
+    if (hitLimitV) {
+      if (posV == limiteMinV) {
+        Serial.println(String("[LÍMITE MIN] Eje V (") + limiteMinV + "°)");
+      } else if (posV == limiteMaxV) {
+        Serial.println(String("[LÍMITE MAX] Eje V (") + limiteMaxV + "°)");
+      }
+    }
+
+    lastSerialPrint = millis();
+    lastPrintTl = tl;
+    lastPrintTr = tr;
+    lastPrintBl = bl;
+    lastPrintBr = br;
+    hasPrintedSensors = true;
+  }
+}
 
 
 void setup() {
@@ -89,16 +152,6 @@ void loop() {
   int bl = analogRead(ldrBL);
   int br = analogRead(ldrBR);
 
-  // Mostrar lectura de LDRs en consola
-  Serial.print("LDR -> TL:");
-  Serial.print(tl);
-  Serial.print(" TR:");
-  Serial.print(tr);
-  Serial.print(" BL:");
-  Serial.print(bl);
-  Serial.print(" BR:");
-  Serial.println(br);
-
   // 2. Calcular promedios para cada eje
   int promedioArriba = (tl + tr) / 2;
   int promedioAbajo = (bl + br) / 2;
@@ -123,7 +176,9 @@ void loop() {
   }
 
   // 3. Lógica Eje Vertical (Elevación) con PID
-  const char* movV = "-";
+  const char* movV = "=";
+  bool movedV = false;
+  bool hitLimitV = false;
   if (moverV) {
     // PID: error = diferencia, derivada = cambio del error
     float errorV = diffV; 
@@ -140,17 +195,19 @@ void loop() {
     
     // Verificar si hubo movimiento real (no en límite)
     if (posV != posVAnterior) {
-      if (correccionV > 0) movV = "^";
-      else if (correccionV < 0) movV = "v";
-    } else {
-      // En el límite
-      if (posV == limiteMinV) Serial.println("[LÍMITE MIN] Eje V (" + String(limiteMinV) + "°)");
-      if (posV == limiteMaxV) Serial.println("[LÍMITE MAX] Eje V (" + String(limiteMaxV) + "°)");
+      movedV = true;
+      if (posV == limiteMinV || posV == limiteMaxV) {
+        hitLimitV = true; // se alcanzó el límite en este paso
+      }
+      if (correccionV > 0) movV = "+";
+      else if (correccionV < 0) movV = "-";
     }
   }
 
   // 4. Lógica Eje Horizontal (Azimut) con PID
-  const char* movH = "-";
+  const char* movH = "=";
+  bool movedH = false;
+  bool hitLimitH = false;
   if (moverH) {
     // PID: error = diferencia, derivada = cambio del error
     float errorH = diffH;
@@ -167,12 +224,12 @@ void loop() {
     
     // Verificar si hubo movimiento
     if (posH != posHAnterior) {
-      if (correccionH > 0) movH = ">";
-      else if (correccionH < 0) movH = "<";
-    } else {
-      // En el límite
-      if (posH == limiteMinH) Serial.println("[LÍMITE MIN] Eje H (" + String(limiteMinH) + "°)");
-      if (posH == limiteMaxH) Serial.println("[LÍMITE MAX] Eje H (" + String(limiteMaxH) + "°)");
+      movedH = true;
+      if (posH == limiteMinH || posH == limiteMaxH) {
+        hitLimitH = true; // se alcanzó el límite en este paso
+      }
+      if (correccionH > 0) movH = "+";
+      else if (correccionH < 0) movH = "-";
     }
   }
 
@@ -180,15 +237,7 @@ void loop() {
   servoV.write(posV);
   servoH.write(posH);
 
-  // Mostrar posición de servos y decisión de movimiento en consola
-  Serial.print("SERVO -> H:");
-  Serial.print(posH);
-  Serial.print(" V:");
-  Serial.print(posV);
-  Serial.print("  MOV -> H:");
-  Serial.print(movH);
-  Serial.print(" V:");
-  Serial.println(movV);
+  printStatusOnChange(tl, tr, bl, br, posH, posV, movH, movV, movedH, movedV, hitLimitH, hitLimitV);
 
   // Enviar posiciones de servos y LDR por HTTP
   if (WiFi.status() == WL_CONNECTED) {
