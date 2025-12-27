@@ -1,9 +1,6 @@
-/* 
-  Avance proyecto, base para poder hacer lo demas
-*/
 
-// Habilitar/deshabilitar modo calibración
-#define CALIBRATION_MODE false
+// ID único del dispositivo (cambiar para cada ESP32)
+#define DEVICE_ID "tracker_01"
 
 #include <WiFi.h>
 #include <ArduinoJson.h>
@@ -11,38 +8,40 @@
 #include <ESP32Servo.h>
 #include "env.h" // Configurar con tus datos en env.h
 
-// Sensores LDR (ADC1)
-const int ldrTL = 33; // Top Left (Arriba Izquierda)
-const int ldrTR = 35; // Top Right (Arriba Derecha)
-const int ldrBL = 32; // Bottom Left (Abajo Izquierda)
-const int ldrBR = 34; // Bottom Right (Abajo Derecha)
+// Pines de sensores LDR
+const int ldrTL = 33;
+const int ldrTR = 35;
+const int ldrBL = 32;
+const int ldrBR = 34;
 
-// Pines de los Servos
-const int pinServoH = 26; // Servo Horizontal (Azimut)
-const int pinServoV = 25; // Servo Vertical (Elevación)
+// Pines de los servos
+const int pinServoH = 26;  // Horizontal (Azimut)
+const int pinServoV = 25;  // Vertical (Elevación)
 
-// Configuración inicial de ángulos
-int posH = 120;
-int posV = 150;
-int tolerancia = 20; // Compensa variación entre LDR
-int limiteMinH = 40, limiteMaxH = 180;  // Límites horizontal
-int limiteMinV = 130, limiteMaxV = 175;  // Límites vertical
+// Medición de voltaje de celda solar
+const int solarPin = 39; // GPIO39 (VN), ADC1_CH3
 
-// Controlador PID
-float Kp = 0.01;  // Ganancia proporcional (reducida para movimiento más lento)
-float Kd = 0.05;  // Ganancia derivativa (suaviza cambios bruscos)
-int maxCambio = 2;  // Cambio máximo de grados por ciclo
-float errorPrevH = 0;
-float errorPrevV = 0;
-Servo servoH;
+// Divisor de tensión: celdas solares (máx ~5V) -> ADC (máx ~3.6V)
+// Esquema: R1=100kΩ (superior) / R2=47kΩ (inferior) + capacitor 104µF
+// Voltaje máximo en ADC: 5V × (47/(100+47)) ≈ 1.6V
+const float SOLAR_DIV_R1 = 100000.0;  // ohmios, entre +solar y nodo de medición
+const float SOLAR_DIV_R2 = 47000.0;   // ohmios, entre nodo de medición y GND
+const float ADC_REF_V = 3.6;          // voltios, rango con atenuación 11dB
+
+int posH = 120, posV = 150;  // Posiciones iniciales
+
+int limiteMinH = 40, limiteMaxH = 180;
+int limiteMinV = 130, limiteMaxV = 175;
+
+Servo servoH, servoV;
+int lastPosH = 0, lastPosV = 0;
 
 // Control de envío HTTP
 unsigned long lastHttpSend = 0;
 const unsigned long HTTP_SEND_INTERVAL = 5000;  // Enviar cada 5 segundos
+unsigned long httpInterval = HTTP_SEND_INTERVAL; // Intervalo actual
+unsigned long fastModeUntil = 0; // Timestamp hasta el que usamos intervalo rápido
 int MIN_CHANGE_TO_SEND = 5; // Mínimo cambio en posición para forzar envío
-int lastPosH = 0;
-int lastPosV = 0;
-Servo servoV;
 
 // Control de impresión serial
 const unsigned long SERIAL_PRINT_INTERVAL = 1000;  // ms entre impresiones si no cambia
@@ -53,60 +52,42 @@ bool hasPrintedSensors = false;
 
 WiFiClient wifi;
 
-#include "calibracion.h" // Lógica de calibración (solo si CALIBRATION_MODE es true)
+// Umbral de cambio mínimo para imprimir voltaje
+const float SERIAL_MIN_DELTA_V = 0.05f; // 50 mV
+float lastPanelVoltage = -1.0f;
 
-void printStatusOnChange(int tl, int tr, int bl, int br,
-                         int posH, int posV,
-                         const char* movH, const char* movV,
-                         bool movedH, bool movedV,
-                         bool hitLimitH, bool hitLimitV) {
+void printStatusOnChange(int tl, int tr, int bl, int br, int posH, int posV, float panelVoltage) {
   bool sensorChanged = (abs(tl - lastPrintTl) > SERIAL_MIN_DELTA) ||
                        (abs(tr - lastPrintTr) > SERIAL_MIN_DELTA) ||
                        (abs(bl - lastPrintBl) > SERIAL_MIN_DELTA) ||
                        (abs(br - lastPrintBr) > SERIAL_MIN_DELTA);
   bool timeElapsed = (millis() - lastSerialPrint) >= SERIAL_PRINT_INTERVAL;
-  bool hasEvent = movedH || movedV || hitLimitH || hitLimitV;
-  bool shouldPrint = hasEvent || !hasPrintedSensors || sensorChanged || timeElapsed;
+  bool pvChanged = (lastPanelVoltage < 0.0f) || (panelVoltage > lastPanelVoltage + SERIAL_MIN_DELTA_V) || (panelVoltage < lastPanelVoltage - SERIAL_MIN_DELTA_V);
+  bool shouldPrint = !hasPrintedSensors || sensorChanged || pvChanged || timeElapsed;
 
   if (shouldPrint) {
-    Serial.print("LDR -> TL:");
+    Serial.print("[" DEVICE_ID "] LDR -> TL:");
     Serial.print(tl);
     Serial.print(" TR:");
     Serial.print(tr);
     Serial.print(" BL:");
     Serial.print(bl);
     Serial.print(" BR:");
-    Serial.println(br);
-
-    Serial.print("SERVO -> H:");
+    Serial.print(br);
+    Serial.print(" | SERVO -> H:");
     Serial.print(posH);
     Serial.print(" V:");
     Serial.print(posV);
-    Serial.print("  MOV -> H:");
-    Serial.print(movH);
-    Serial.print(" V:");
-    Serial.println(movV);
-
-    if (hitLimitH) {
-      if (posH == limiteMinH) {
-        Serial.println(String("[LÍMITE MIN] Eje H (") + limiteMinH + "°)");
-      } else if (posH == limiteMaxH) {
-        Serial.println(String("[LÍMITE MAX] Eje H (") + limiteMaxH + "°)");
-      }
-    }
-    if (hitLimitV) {
-      if (posV == limiteMinV) {
-        Serial.println(String("[LÍMITE MIN] Eje V (") + limiteMinV + "°)");
-      } else if (posV == limiteMaxV) {
-        Serial.println(String("[LÍMITE MAX] Eje V (") + limiteMaxV + "°)");
-      }
-    }
+    Serial.print(" | PV:");
+    Serial.print(panelVoltage, 3);
+    Serial.println("V");
 
     lastSerialPrint = millis();
     lastPrintTl = tl;
     lastPrintTr = tr;
     lastPrintBl = bl;
     lastPrintBr = br;
+    lastPanelVoltage = panelVoltage;
     hasPrintedSensors = true;
   }
 }
@@ -118,13 +99,15 @@ void setup() {
   // Configuración de Servos
   servoH.attach(pinServoH, 500, 2500);
   servoV.attach(pinServoV, 500, 2500);
-
   servoH.write(posH);
   servoV.write(posV);
   delay(1000);
 
-  // Conectar WiFi solo si no estamos en modo calibración
-#if !CALIBRATION_MODE
+  // Configuracion de atenuación de hasta ~3.6V en ADC para medición de panel solar
+  // ADC_11db: rango ~0-3.6V
+  analogSetPinAttenuation(solarPin, ADC_11db);
+
+  // Conectar a WiFi
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
@@ -133,18 +116,15 @@ void setup() {
   Serial.println("Connected to the WiFi network");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
-#endif
-
-#if CALIBRATION_MODE
-  enterCalibrationMode();
-#endif
 }
 
 void loop() {
-#if CALIBRATION_MODE
-  // Escuchar comandos de calibración por serial
-  handleSerialCommands();
-#endif
+  
+  // Volver a intervalo normal si terminó modo rápido
+  if (fastModeUntil != 0 && millis() > fastModeUntil) {
+    httpInterval = HTTP_SEND_INTERVAL;
+    fastModeUntil = 0;
+  }
   
   // 1. Leer valores de luz de los 4 LDRs
   int tl = analogRead(ldrTL);
@@ -152,118 +132,42 @@ void loop() {
   int bl = analogRead(ldrBL);
   int br = analogRead(ldrBR);
 
-  // 2. Calcular promedios para cada eje
-  int promedioArriba = (tl + tr) / 2;
-  int promedioAbajo = (bl + br) / 2;
-  int promedioIzquierda = (tl + bl) / 2;
-  int promedioDerecha = (tr + br) / 2;
+  // Lectura de voltaje del panel con divisor
+  int solarRaw = analogRead(solarPin);
+  float v_adc = (float)solarRaw / 4095.0 * ADC_REF_V;
+  float panelVoltage = v_adc * ((SOLAR_DIV_R1 + SOLAR_DIV_R2) / SOLAR_DIV_R2);
 
-  // Calcular diferencias
-  int diffV = promedioArriba - promedioAbajo;
-  int diffH = promedioIzquierda - promedioDerecha;
+  printStatusOnChange(tl, tr, bl, br, posH, posV, panelVoltage);
 
-  // Decidir qué eje mover (solo uno a la vez)
-  bool moverV = false;
-  bool moverH = false;
-  
-  if (abs(diffV) > tolerancia || abs(diffH) > tolerancia) {
-    // Mover solo el eje con mayor error
-    if (abs(diffV) > abs(diffH)) {
-      moverV = true;
-    } else {
-      moverH = true;
-    }
-  }
-
-  // 3. Lógica Eje Vertical (Elevación) con PID
-  const char* movV = "=";
-  bool movedV = false;
-  bool hitLimitV = false;
-  if (moverV) {
-    // PID: error = diferencia, derivada = cambio del error
-    float errorV = diffV; 
-    float derivV = errorV - errorPrevV;
-    float correccionV = (Kp * errorV) + (Kd * derivV);
-    
-    // Limitar cambio máximo por ciclo
-    correccionV = constrain(correccionV, -maxCambio, maxCambio);
-    
-    int posVAnterior = posV;
-    posV -= (int)correccionV;  // Invertido
-    posV = constrain(posV, limiteMinV, limiteMaxV);
-    errorPrevV = errorV;
-    
-    // Verificar si hubo movimiento real (no en límite)
-    if (posV != posVAnterior) {
-      movedV = true;
-      if (posV == limiteMinV || posV == limiteMaxV) {
-        hitLimitV = true; // se alcanzó el límite en este paso
-      }
-      if (correccionV > 0) movV = "+";
-      else if (correccionV < 0) movV = "-";
-    }
-  }
-
-  // 4. Lógica Eje Horizontal (Azimut) con PID
-  const char* movH = "=";
-  bool movedH = false;
-  bool hitLimitH = false;
-  if (moverH) {
-    // PID: error = diferencia, derivada = cambio del error
-    float errorH = diffH;
-    float derivH = errorH - errorPrevH;
-    float correccionH = (Kp * errorH) + (Kd * derivH);
-    
-    // Limitar cambio máximo por ciclo
-    correccionH = constrain(correccionH, -maxCambio, maxCambio);
-    
-    int posHAnterior = posH;
-    posH += (int)correccionH;
-    posH = constrain(posH, limiteMinH, limiteMaxH);
-    errorPrevH = errorH;
-    
-    // Verificar si hubo movimiento
-    if (posH != posHAnterior) {
-      movedH = true;
-      if (posH == limiteMinH || posH == limiteMaxH) {
-        hitLimitH = true; // se alcanzó el límite en este paso
-      }
-      if (correccionH > 0) movH = "+";
-      else if (correccionH < 0) movH = "-";
-    }
-  }
-
-  // 6. Aplicar movimiento
-  servoV.write(posV);
-  servoH.write(posH);
-
-  printStatusOnChange(tl, tr, bl, br, posH, posV, movH, movV, movedH, movedV, hitLimitH, hitLimitV);
-
-  // Enviar posiciones de servos y LDR por HTTP
+  // 2. Enviar datos al servidor y recibir comandos
   if (WiFi.status() == WL_CONNECTED) {
-    // Enviar solo cada 5 segundos O si la posición cambió significativamente
     unsigned long now = millis();
-    bool tiempoTranscurrido = (now - lastHttpSend) >= HTTP_SEND_INTERVAL;
+    bool tiempoTranscurrido = (now - lastHttpSend) >= httpInterval;
     bool posicionCambio = (abs(posH - lastPosH) > MIN_CHANGE_TO_SEND) || (abs(posV - lastPosV) > MIN_CHANGE_TO_SEND);
 
     if (tiempoTranscurrido || posicionCambio) {
       StaticJsonDocument<256> doc;
+      doc["device_id"] = DEVICE_ID;
       doc["ldr_tl"] = tl;
       doc["ldr_tr"] = tr;
       doc["ldr_bl"] = bl;
       doc["ldr_br"] = br;
       doc["servo_h"] = posH;
       doc["servo_v"] = posV;
+      
+      bool limitH = (posH == limiteMinH || posH == limiteMaxH);
+      bool limitV = (posV == limiteMinV || posV == limiteMaxV);
+      doc["at_limit_h"] = limitH;
+      doc["at_limit_v"] = limitV;
+      doc["panel_voltage"] = panelVoltage;
 
       String json_string;
       serializeJson(doc, json_string);
-      Serial.print("JSON -> ");
+      Serial.print("[" DEVICE_ID "] Enviando: ");
       Serial.println(json_string);
 
       HTTPClient http;
       String url = String(SERVER_BASE_URL) + "/sensor_values";
-      Serial.print("POST URL: ");
-      Serial.println(url);
       http.begin(wifi, url);
       http.setConnectTimeout(5000);
       http.addHeader("Content-Type", "application/json");
@@ -271,30 +175,68 @@ void loop() {
       int httpResponseCode = http.POST(json_string);
       if (httpResponseCode > 0) {
         String response = http.getString();
-        Serial.print("HTTP ");
-        Serial.println(httpResponseCode);
-        Serial.println(response);
-      } else {
-        Serial.print("Error on sending POST Request: ");
+        Serial.print("[" DEVICE_ID "] HTTP ");
         Serial.print(httpResponseCode);
-        Serial.print(" ");
+        Serial.print(": ");
+        Serial.println(response);
+
+        // 3. Procesar respuesta del servidor con nuevos ángulos
+        if (httpResponseCode == 200) {
+          StaticJsonDocument<256> responseDoc;
+          DeserializationError error = deserializeJson(responseDoc, response);
+          
+          if (!error && responseDoc.containsKey("command")) {
+            JsonObject cmd = responseDoc["command"];
+            
+            if (cmd.containsKey("servo_h") && cmd.containsKey("servo_v")) {
+              int newH = cmd["servo_h"];
+              int newV = cmd["servo_v"];
+              
+              // 4. Validar límites
+              bool validH = (newH >= limiteMinH && newH <= limiteMaxH);
+              bool validV = (newV >= limiteMinV && newV <= limiteMaxV);
+              
+              if (validH && validV) {
+                posH = newH;
+                posV = newV;
+                servoH.write(posH);
+                servoV.write(posV);
+                Serial.print("[" DEVICE_ID "] Movido a H:");
+                Serial.print(posH);
+                Serial.print(" V:");
+                Serial.println(posV);
+              } else {
+                Serial.println("[" DEVICE_ID "] Ángulos fuera de límites");
+              }
+            }
+          }
+
+          // Activar modo rápido temporal si el servidor lo indica
+          if (!error && responseDoc.containsKey("fast")) {
+            JsonObject fast = responseDoc["fast"];
+            if (fast.containsKey("fast_interval_ms") && fast.containsKey("fast_duration_ms")) {
+              unsigned long fi = fast["fast_interval_ms"];
+              unsigned long fd = fast["fast_duration_ms"];
+              if (fi >= 200 && fi <= 2000 && fd <= 10000) {
+                httpInterval = fi;
+                fastModeUntil = millis() + fd;
+              }
+            }
+          }
+        }
+      } else {
+        Serial.print("[" DEVICE_ID "] HTTP Error: ");
         Serial.println(http.errorToString(httpResponseCode));
-        Serial.print("WiFi IP: ");
-        Serial.println(WiFi.localIP());
-        Serial.print("WiFi RSSI: ");
-        Serial.println(WiFi.RSSI());
       }
       http.end();
 
-      // Actualizar timer y posición
       lastHttpSend = now;
       lastPosH = posH;
       lastPosV = posV;
     }
   } else {
-    Serial.println("Error in WiFi connection");
+    Serial.println("[" DEVICE_ID "] Error: WiFi desconectado");
   }
 
-  // Pequeña pausa para suavizar el movimiento
   delay(50);
 }
