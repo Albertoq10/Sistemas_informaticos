@@ -1,3 +1,6 @@
 # Environment-specific files
 env.h
 .env
+
+__pycache__/
+*.pyc
