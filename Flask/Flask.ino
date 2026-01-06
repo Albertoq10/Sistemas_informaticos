@@ -1,12 +1,20 @@
 
 // ID único del dispositivo (cambiar para cada ESP32)
 #define DEVICE_ID "tracker_01"
+#define I2C_SDA 21
+#define I2C_SCL 22
+
 
 #include <WiFi.h>
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <ESP32Servo.h>
-#include "env.h" // Configurar con tus datos en env.h
+#include "env.h" // cambia dependiendo de la red
+#include <Wire.h>
+#include "SparkFunBME280.h"
+
+BME280 bme;
+bool bme_ok = false;
 
 // Pines de sensores LDR
 const int ldrTL = 33;
@@ -15,8 +23,8 @@ const int ldrBL = 32;
 const int ldrBR = 34;
 
 // Pines de los servos
-const int pinServoH = 26;  // Horizontal (Azimut)
-const int pinServoV = 25;  // Vertical (Elevación)
+const int pinServoH = 26;  // Horizontal 
+const int pinServoV = 25;  // Vertical
 
 // Medición de voltaje de celda solar
 const int solarPin = 39; // GPIO39 (VN), ADC1_CH3
@@ -31,14 +39,14 @@ const float ADC_REF_V = 3.6;          // voltios, rango con atenuación 11dB
 int posH = 120, posV = 150;  // Posiciones iniciales
 
 int limiteMinH = 40, limiteMaxH = 180;
-int limiteMinV = 130, limiteMaxV = 175;
+int limiteMinV = 40, limiteMaxV = 175;
 
 Servo servoH, servoV;
 int lastPosH = 0, lastPosV = 0;
 
-// Control de envío HTTP
+
 unsigned long lastHttpSend = 0;
-const unsigned long HTTP_SEND_INTERVAL = 5000;  // Enviar cada 5 segundos
+const unsigned long HTTP_SEND_INTERVAL = 500;  // timepo de envio, ms
 unsigned long httpInterval = HTTP_SEND_INTERVAL; // Intervalo actual
 unsigned long fastModeUntil = 0; // Timestamp hasta el que usamos intervalo rápido
 int MIN_CHANGE_TO_SEND = 5; // Mínimo cambio en posición para forzar envío
@@ -116,10 +124,33 @@ void setup() {
   Serial.println("Connected to the WiFi network");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
+
+   //Wire.begin(); 
+  Wire.begin(I2C_SDA, I2C_SCL);
+
+  bme_ok = bme.beginI2C();  //  BME280
+  if (!bme_ok) {
+    Serial.println("BME280 no responde. Continuando sin BME280");
+  } else {
+    Serial.println("BME280 OK");
+  }
 }
 
 void loop() {
-  
+
+  //sensor 
+  float bme_tempC = NAN;
+  float bme_hPa   = NAN;
+  float bme_hum   = NAN;
+  float bme_altm  = NAN;
+
+  if (bme_ok) {
+    bme_tempC = bme.readTempC();
+    bme_hPa   = bme.readFloatPressure() / 100.0f;  // Pa -> hPa
+    bme_hum   = bme.readFloatHumidity();
+    bme_altm  = bme.readFloatAltitudeMeters();
+  }
+  //////////////
   // Volver a intervalo normal si terminó modo rápido
   if (fastModeUntil != 0 && millis() > fastModeUntil) {
     httpInterval = HTTP_SEND_INTERVAL;
@@ -133,9 +164,9 @@ void loop() {
   int br = analogRead(ldrBR);
 
   // Lectura de voltaje del panel con divisor
-  int solarRaw = analogRead(solarPin);
-  float v_adc = (float)solarRaw / 4095.0 * ADC_REF_V;
-  float panelVoltage = v_adc * ((SOLAR_DIV_R1 + SOLAR_DIV_R2) / SOLAR_DIV_R2);
+ uint32_t mv = analogReadMilliVolts(solarPin); // mV en el pin ADC
+ float v_adc = mv / 1000.0f;                  // volts reales aproximados en ADC
+ float panelVoltage = v_adc * ((SOLAR_DIV_R1 + SOLAR_DIV_R2) / SOLAR_DIV_R2);
 
   printStatusOnChange(tl, tr, bl, br, posH, posV, panelVoltage);
 
@@ -146,7 +177,7 @@ void loop() {
     bool posicionCambio = (abs(posH - lastPosH) > MIN_CHANGE_TO_SEND) || (abs(posV - lastPosV) > MIN_CHANGE_TO_SEND);
 
     if (tiempoTranscurrido || posicionCambio) {
-      StaticJsonDocument<256> doc;
+      StaticJsonDocument<384> doc;
       doc["device_id"] = DEVICE_ID;
       doc["ldr_tl"] = tl;
       doc["ldr_tr"] = tr;
@@ -160,7 +191,15 @@ void loop() {
       doc["at_limit_h"] = limitH;
       doc["at_limit_v"] = limitV;
       doc["panel_voltage"] = panelVoltage;
+     
+      if (bme_ok) {
+        doc["bme_temp_c"]   = bme_tempC;
+        doc["bme_press_hpa"] = bme_hPa;
+        doc["bme_hum_pct"]  = bme_hum;
+        doc["bme_alt_m"]    = bme_altm;
+      }
 
+    
       String json_string;
       serializeJson(doc, json_string);
       Serial.print("[" DEVICE_ID "] Enviando: ");
@@ -180,7 +219,7 @@ void loop() {
         Serial.print(": ");
         Serial.println(response);
 
-        // 3. Procesar respuesta del servidor con nuevos ángulos
+        // respuesta del servidor con nuevos ángulos
         if (httpResponseCode == 200) {
           StaticJsonDocument<256> responseDoc;
           DeserializationError error = deserializeJson(responseDoc, response);
@@ -191,6 +230,7 @@ void loop() {
             if (cmd.containsKey("servo_h") && cmd.containsKey("servo_v")) {
               int newH = cmd["servo_h"];
               int newV = cmd["servo_v"];
+              
               
               // 4. Validar límites
               bool validH = (newH >= limiteMinH && newH <= limiteMaxH);
