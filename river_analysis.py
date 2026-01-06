@@ -268,4 +268,5 @@ class RiverAnalyzer:
             'predictions_count': self.model_predictions_count,
             'anomalies_detected': self.anomalies_detected,
             'drift_detected_count': self.drift_detected_count
+
         }
