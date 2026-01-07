@@ -43,10 +43,7 @@ class DevicePIDController:
 
     def calcular_angulos(self, ldr_tl, ldr_tr, ldr_bl, ldr_br, current_h, current_v, at_limit_h=False, at_limit_v=False):
         """
-        Calcula los nuevos ángulos usando control PID basado en las lecturas de LDR.
-
-        Returns:
-            tuple: (nuevo_h, nuevo_v, debug_info)
+        Uso de PID para determinar posicion de servos
         """
         self.lastPosH = current_h
         self.lastPosV = current_v
@@ -68,8 +65,8 @@ class DevicePIDController:
            # else:
             #    moverH = True
 
-
-         #para que ambos ejes se puedan estar moviendo sin darle prioridad a otro
+        #cambio
+        #para que ambos ejes se puedan estar moviendo sin darle prioridad a otro
         moverV = abs(diffV) > self.tolerancia
         moverH = abs(diffH) > self.tolerancia
 
@@ -166,6 +163,8 @@ def _load_env_file(path: str = ".env"):
 
 _load_env_file()
 
+
+#estos datos cambian dependiendo de los datos de influx
 INFLUX_URL_BASE = os.environ.get('INFLUX_URL_BASE', '127.0.0.1')
 INFLUX_TOKEN    = os.environ.get('INFLUX_TOKEN', 'NtZ58sLCY9fxPHq5yzC5qOr8iXVGHq81XWZs5wqu4JrN8EFgPLpFb7h96IrxCoJSSrJH85SilSxO0rrgH9VAIA==')
 INFLUX_ORG      = os.environ.get('INFLUX_ORG', 'UC3M')
@@ -340,7 +339,7 @@ def sensor_values():
 
 
 
-    # Caso: potenciómetro + voltaje
+    # pruebas iniciales con el pot
     pot_value = int(data.get("pot_value", 0))
     voltage   = float(data.get("voltage", float("nan")))
 
