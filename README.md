@@ -1,7 +1,9 @@
 # Flask Project - Solar Tracker
 
+> Nota: Este repositorio forma parte de una tarea del curso "Máster Universitario en Internet de las Cosas: Tecnologías Aplicadas" (2025-2026), asignatura "Sistemas informáticos en IoT". Proyecto: "Seguimiento Solar Inteligente de Dos Ejes con ESP32 y Predicción de Voltaje mediante Aprendizaje Automático".
+
 ## Descripción
-Sistema de seguimiento solar con ESP32 que utiliza 4 sensores LDR para orientar dos servomotores (horizontal y vertical) hacia la fuente de luz más intensa. Los datos se envían a un servidor Flask que los almacena en InfluxDB.
+Sistema de seguimiento solar con ESP32 que utiliza 4 sensores LDR para orientar dos servomotores (horizontal y vertical) hacia la fuente de luz más intensa. Además, integra un sensor ambiental BME280 (I2C) para medir temperatura, humedad, presión y calcular altitud aproximada. También mide el voltaje del panel/celda solar mediante ADC. Los datos se envían a un servidor Flask que los almacena en InfluxDB.
 
 ## Pines Utilizados
 
@@ -13,6 +15,9 @@ Sistema de seguimiento solar con ESP32 que utiliza 4 sensores LDR para orientar 
 | 34 | LDR Bottom Right | Sensor de luz inferior derecho (ADC1) |
 | 26 | Servo Horizontal | Control de azimut (0-180°) |
 | 25 | Servo Vertical | Control de elevación (0-180°) |
+| 21 | I2C SDA (BME280) | Línea de datos I2C para BME280 |
+| 22 | I2C SCL (BME280) | Línea de reloj I2C para BME280 |
+| 39 | Panel Solar ADC | Medición de voltaje del panel (ADC1_CH3) |
 
 ## Componentes
 
@@ -22,6 +27,12 @@ Sistema de seguimiento solar con ESP32 que utiliza 4 sensores LDR para orientar 
 - **Flask**: Framework web para servidor HTTP
 - **InfluxDB**: Base de datos de series temporales
 - **River**: Librería de machine learning
+- **BME280**: Sensor ambiental (temperatura, humedad y presión; altitud estimada)
+
+Notas BME280:
+- Conexión I2C a ESP32: SDA → GPIO21, SCL → GPIO22, alimentación a 3.3V.
+- Librería Arduino recomendada: SparkFun BME280.
+- El código detecta si el BME está presente; si no, continúa sin medidas ambientales.
 
 ## Endpoint API
 
@@ -32,7 +43,7 @@ Recibe datos del ESP32 y los almacena en InfluxDB.
 
 **Content-Type:** `application/json`
 
-**Datos enviados por el Solar Tracker:**
+**Datos enviados por el Solar Tracker (LDR, servos, panel):**
 ```json
 {
   "ldr_tl": 1234,
@@ -40,7 +51,11 @@ Recibe datos del ESP32 y los almacena en InfluxDB.
   "ldr_bl": 1220,
   "ldr_br": 1225,
   "servo_h": 120,
-  "servo_v": 150
+  "servo_v": 150,
+  "panel_voltage": 1.62,
+  "device_id": "tracker_01",
+  "at_limit_h": false,
+  "at_limit_v": false
 }
 ```
 
@@ -51,6 +66,25 @@ Recibe datos del ESP32 y los almacena en InfluxDB.
 - `ldr_br`: Lectura ADC del sensor inferior derecho (0-4095)
 - `servo_h`: Posición del servo horizontal en grados (40-180°)
 - `servo_v`: Posición del servo vertical en grados (130-175°)
+- `panel_voltage`: Voltaje calculado del panel/celda solar en voltios
+- `device_id`: Identificador del dispositivo ESP32
+- `at_limit_h` / `at_limit_v`: Indicadores de si algún servo está en su límite físico
+
+**Datos ambientales opcionales (BME280):**
+```json
+{
+  "bme_temp_c": 24.7,
+  "bme_press_hpa": 1009.3,
+  "bme_hum_pct": 45.2,
+  "bme_alt_m": 650.1
+}
+```
+
+**Campos ambientales:**
+- `bme_temp_c`: Temperatura ambiente en °C
+- `bme_press_hpa`: Presión atmosférica en hPa
+- `bme_hum_pct`: Humedad relativa en %
+- `bme_alt_m`: Altitud estimada en metros (derivada de la presión)
 
 **Respuesta exitosa (200):**
 ```json
@@ -69,11 +103,50 @@ Recibe datos del ESP32 y los almacena en InfluxDB.
 }
 ```
 
+## Ejemplo de código (ESP32 + BME280)
+
+Fragmento relevante del envío JSON desde `Flask/Flask.ino` cuando el BME280 está presente:
+
+```cpp
+// I2C: SDA=21, SCL=22
+Wire.begin(21, 22);
+bool bme_ok = bme.beginI2C();
+
+// Lecturas BME280 (si está disponible)
+float bme_tempC = NAN;
+float bme_hPa   = NAN;
+float bme_hum   = NAN;
+float bme_altm  = NAN;
+
+if (bme_ok) {
+  bme_tempC = bme.readTempC();
+  bme_hPa   = bme.readFloatPressure() / 100.0f; // Pa -> hPa
+  bme_hum   = bme.readFloatHumidity();
+  bme_altm  = bme.readFloatAltitudeMeters();
+}
+
+StaticJsonDocument<384> doc;
+doc["device_id"] = "tracker_01";
+// ... LDR y servos ...
+doc["panel_voltage"] = panelVoltage; // GPIO39 con divisor
+
+if (bme_ok) {
+  doc["bme_temp_c"]   = bme_tempC;
+  doc["bme_press_hpa"] = bme_hPa;
+  doc["bme_hum_pct"]  = bme_hum;
+  doc["bme_alt_m"]    = bme_altm;
+}
+```
+
 ## Instalación
 
 ```bash
 pip install -r requirements.txt
 ```
+
+Para el firmware ESP32 (Arduino IDE):
+- Instale la librería "SparkFun BME280" desde el gestor de librerías.
+- Conecte el módulo BME280 a 3.3V, GND, SDA (GPIO21) y SCL (GPIO22).
 
 ## Configuración
 
@@ -98,12 +171,5 @@ El servidor estará disponible en `http://0.0.0.0:6000`
 1. Subir el código `Flask.ino` al ESP32
 2. El sistema se conectará a WiFi y comenzará a enviar datos cada 5 segundos
 3. Los servos se ajustarán automáticamente siguiendo la luz
+4. Si el BME280 está conectado por I2C (GPIO21/22), se incluirán medidas de temperatura, humedad, presión y altitud en el JSON.
 
-## Calibración
-
-Para entrar en modo calibración, cambiar en `Flask.ino`:
-```cpp
-#define CALIBRATION_MODE true
-```
-
-Esto permite ajustar los límites de los servos mediante comandos seriales.
