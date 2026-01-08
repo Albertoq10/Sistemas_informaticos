@@ -99,11 +99,3 @@ El servidor estará disponible en `http://0.0.0.0:6000`
 2. El sistema se conectará a WiFi y comenzará a enviar datos cada 5 segundos
 3. Los servos se ajustarán automáticamente siguiendo la luz
 
-## Calibración
-
-Para entrar en modo calibración, cambiar en `Flask.ino`:
-```cpp
-#define CALIBRATION_MODE true
-```
-
-Esto permite ajustar los límites de los servos mediante comandos seriales.
